@@ -42,8 +42,8 @@ use crate::Config;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
-pub(crate) fn init(cfg: Config) -> Result<(), Config> {
-	CONFIG.set(cfg)
+pub(crate) fn init(cfg: Config) -> bool {
+	CONFIG.set(cfg).is_ok()
 }
 
 pub(crate) fn config() -> &'static Config {
@@ -832,6 +832,12 @@ struct Tracer {
 	/// spurious syscall-entry stop has not been consumed yet. The entry stop
 	/// must be skipped; the stop after it carries the syscall result.
 	expect_entry: HashSet<Pid>,
+	/// True on Linux 3.5–4.7 where seccomp ran before `PTRACE_SYSCALL` entry,
+	/// so resuming a `PTRACE_EVENT_SECCOMP` stop with `PTRACE_SYSCALL` emits an
+	/// extra syscall-entry stop before the syscall-exit stop. False on Linux >=
+	/// 4.8, where `PTRACE_EVENT_SECCOMP` fires after entry and the next
+	/// `PTRACE_SYSCALL` stop is directly the exit.
+	seccomp_emits_entry: bool,
 	/// true when tracing every syscall (fallback); false in seccomp mode.
 	syscall_mode: bool,
 	/// true when the seccomp filter is installed, so we only stop on the
@@ -937,7 +943,7 @@ impl Tracer {
 							if let Ok(r) = ptrace::getregs(pid) {
 								eprintln!(
 									"kernel-compat: signal {} at {:#x} in {} rsp={:#x} rax={:#x} rdi={:#x} r11={:#x}",
-									sig as i32, r.rip, module_for(pid, r.rip), r.rsp, r.rax, r.rdi, r.r11
+									sig, r.rip, module_for(pid, r.rip), r.rsp, r.rax, r.rdi, r.r11
 								);
 								// Poor man's unwinder: every stack word that points into
 								// an executable mapping is a candidate return address, so
@@ -1019,10 +1025,13 @@ impl Tracer {
 					// getrandom and the timed futex also need the exit stop to
 					// convert the result, fill the buffer or restore rsp.
 					if self.on_seccomp_stop(pid) {
-						// PTRACE_SYSCALL from a seccomp stop also trips the
-						// syscall-entry trace, so the next stop is the entry,
-						// not the exit. Remember we owe an exit.
-						self.expect_entry.insert(pid);
+						// On Linux < 4.8, PTRACE_SYSCALL from a seccomp stop also
+						// trips the syscall-entry trace, so skip that entry stop
+						// before handling the exit. On Linux >= 4.8 the next stop
+						// is already the syscall exit.
+						if self.seccomp_emits_entry {
+							self.expect_entry.insert(pid);
+						}
 						self.resume_syscall(pid, None);
 					} else {
 						self.resume(pid, None);
@@ -2088,6 +2097,7 @@ fn supervise(child: Pid, use_seccomp: bool) -> ! {
 	// filtered syscalls stop us.
 	let seccomp_mode = use_seccomp && options.contains(Options::PTRACE_O_TRACESECCOMP);
 	let syscall_mode = !seccomp_mode && options.contains(Options::PTRACE_O_TRACESYSGOOD);
+	let seccomp_emits_entry = kernel_lt(4, 8, 0);
 	if debug() {
 		eprintln!("kernel-compat: active options: {options:?}");
 	}
@@ -2104,6 +2114,7 @@ fn supervise(child: Pid, use_seccomp: bool) -> ! {
 		reserved: HashMap::new(),
 		stashed_signal: HashMap::new(),
 		expect_entry: HashSet::new(),
+		seccomp_emits_entry,
 		syscall_mode,
 		seccomp_mode,
 		main_code: None,

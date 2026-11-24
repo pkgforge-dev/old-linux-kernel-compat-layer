@@ -153,6 +153,7 @@ enum Outcome {
 	Adopted,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Active {
 	Sequence {
 		/// Registers as they were at the entry stop of the emulated call, so the

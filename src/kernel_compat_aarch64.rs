@@ -61,8 +61,8 @@ use crate::Config;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
-pub(crate) fn init(cfg: Config) -> Result<(), Config> {
-	CONFIG.set(cfg)
+pub(crate) fn init(cfg: Config) -> bool {
+	CONFIG.set(cfg).is_ok()
 }
 
 pub(crate) fn config() -> &'static Config {
@@ -846,11 +846,11 @@ impl Tracer {
 		// Pre-3.19 deferred `statx`: if the kernel returned -ENOSYS, rewind
 		// `pc` to `svc #0` and run `newfstatat` / `fstat` as a follow-up call.
 		if let Some(saved) = self.statx_deferred.remove(&pid) {
-			if regs.regs[0] == (-(libc::ENOSYS as i64)) as u64 {
-				if self.start_statx_replay(pid, saved, regs) {
-					self.last_syscall.remove(&pid);
-					return;
-				}
+			if regs.regs[0] == (-(libc::ENOSYS as i64)) as u64
+				&& self.start_statx_replay(pid, saved, regs)
+			{
+				self.last_syscall.remove(&pid);
+				return;
 			}
 		}
 

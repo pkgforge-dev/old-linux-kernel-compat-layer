@@ -85,8 +85,9 @@ impl Default for Config {
 /// Configure env var names, log prefix, and probe sentinel before calling
 /// [`enabled`], [`enter`], [`run_traced`], or [`run_command_traced`].
 ///
-/// Only the first call takes effect; subsequent calls return `Err(config)`.
-pub fn init(config: Config) -> Result<(), Config> {
+/// Only the first call takes effect; returns `true` if `config` was installed,
+/// `false` if already initialized.
+pub fn init(config: Config) -> bool {
 	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 	{
 		kernel_compat::init(config)
@@ -94,7 +95,7 @@ pub fn init(config: Config) -> Result<(), Config> {
 	#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 	{
 		let _ = config;
-		Ok(())
+		true
 	}
 }
 
