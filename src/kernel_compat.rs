@@ -262,6 +262,14 @@ fn open_cloexec_unknown() -> bool {
 	*UNKNOWN.get_or_init(|| kernel_lt(2, 6, 23))
 }
 
+/// Up to 2.6.1 `clone` refuses a `CLONE_THREAD` call (EINVAL) unless `CLONE_DETACHED` is set
+/// too; the check is gone in 2.6.2. glibc's NPTL never sets that flag, so without it every
+/// `pthread_create` fails there.
+fn clone_thread_needs_detached() -> bool {
+	static NEEDED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*NEEDED.get_or_init(|| kernel_lt(2, 6, 2))
+}
+
 fn is_at_call(nr: u64) -> bool {
 	[
 		libc::SYS_openat, libc::SYS_mkdirat, libc::SYS_mknodat, libc::SYS_fchownat,
@@ -1141,6 +1149,18 @@ impl Tracer {
 			if !at_missing() {
 				return Some(false);
 			}
+		}
+		if regs.orig_rax == libc::SYS_clone as u64
+			&& regs.rdi & libc::CLONE_THREAD as u64 != 0
+			&& regs.rdi & libc::CLONE_DETACHED as u64 == 0
+			&& clone_thread_needs_detached()
+		{
+			regs.rdi |= libc::CLONE_DETACHED as u64;
+			let _ = ptrace::setregs(pid, regs);
+			if debug() {
+				eprintln!("kernel-compat: clone(CLONE_THREAD) given CLONE_DETACHED (needs 2.6.2)");
+			}
+			return Some(false);
 		}
 		if regs.orig_rax == libc::SYS_futex as u64 {
 			// A timed WAIT_BITSET reserves scratch; if so it needs its exit
