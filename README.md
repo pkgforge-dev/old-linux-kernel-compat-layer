@@ -17,6 +17,7 @@ Most syscalls are rewritten in place to an older equivalent; syscalls that no si
 
 - **`FUTEX_WAIT_BITSET` / `FUTEX_WAKE_BITSET`** (2.6.25) -> `FUTEX_WAIT` / `FUTEX_WAKE`, and **`FUTEX_CLOCK_REALTIME`** waits (2.6.29) -> plain waits with a relative timeout.
 - **`O_CLOEXEC`** (2.6.23) cleared from `open` and `openat` flags on pre-2.6.23 kernels (avoids vendor kernels such as Fedora Core 3/4 returning errno 530 instead of `ENOENT`).
+- **`clone(CLONE_THREAD)`** (2.6.2) gets `CLONE_DETACHED` added on 2.6.0 and 2.6.1, which refuse a thread without it (glibc's `pthread_create` never sets it).
 - **`pipe2`** (2.6.27) -> emulated as `pipe` + `fcntl` so `O_NONBLOCK` and `O_CLOEXEC` are preserved (`O_DIRECT` falls back to plain `pipe`).
 - **The `*at` syscall family** (2.6.16: `openat`, `newfstatat`, `mkdirat`, `mknodat`, `fchownat`, `futimesat`, `unlinkat`, `renameat`, `linkat`, `symlinkat`, `readlinkat`, `fchmodat`, `faccessat`) -> plain syscalls, rebuilding dirfd-relative paths through `/proc/self/fd/<fd>/<path>` (needs `/proc`).
 - **`statx`** (4.11) -> `newfstatat` / `fstat` (or `stat` / `lstat` / `fstat` where `newfstatat` is also missing), translating `struct stat` into `struct statx`.
