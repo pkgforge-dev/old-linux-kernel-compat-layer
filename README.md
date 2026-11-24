@@ -32,7 +32,10 @@ Modern binaries and libc builds both execute instructions old kernels do not ena
 - **`x86_64` Linux only.** On other architectures the crate still compiles cleanly as a no-op shim (`enabled()` returns `false`, `enter()` is a no-op, `run_traced` / `run_command_traced` run the target directly).
 - **No 32-bit translation.** 32-bit tracees are traced and have their signals forwarded, but their syscalls are never rewritten.
 - **Seccomp vs. ptrace fallback.** On kernels with seccomp-bpf (3.5+), only the needed syscalls trap into the tracer (this sets `no_new_privs`, so setuid helpers cannot gain privileges). Older kernels fall back to tracing every syscall with ptrace.
-- **Nested tracing.** If the process is already traced (`TracerPid != 0` in `/proc/self/status`), the layer does not attempt to nest ptrace and runs directly.
+- **Nested / multi-process conflict prevention.** When the layer activates, it exports `OLD_KERNEL_COMPAT_ACTIVE=<tracer_pid>` to the traced child process. Any descendant binary that also embeds this crate checks both `/proc/self/status` (`TracerPid != 0`) and `OLD_KERNEL_COMPAT_ACTIVE` via `is_active()` (which `enabled()` and `enter()`/`run_traced()` check automatically):
+  - If already traced, `enabled()` returns `false` and `enter()` / `run_traced()` run directly without forking a second tracer, installing a second seccomp filter, or printing a spurious `ptrace unavailable` warning — even if the child clears its environment (`env -i`) or uses different `Config` env var names.
+  - If `/proc/self/status` is readable and reports `TracerPid: 0`, any leftover `OLD_KERNEL_COMPAT_ACTIVE` is treated as stale and ignored so a detached or post-tracer process is not left unprotected.
+  - If `/proc` is unavailable in a descendant, `OLD_KERNEL_COMPAT_ACTIVE` still acts as a fallback guard.
 
 ## Usage
 
@@ -108,6 +111,7 @@ fn main() {
 - `OLD_KERNEL_COMPAT` (fallback: `SHARUN_OLD_KERNEL_COMPAT`): `1` forces the layer on, `0` disables it, unset auto-enables on kernels older than 4.0 or when `statx` is missing.
 - `OLD_KERNEL_COMPAT_DEBUG` (fallback: `SHARUN_OLD_KERNEL_COMPAT_DEBUG`): `1` logs translations to stderr.
 - `OLD_KERNEL_COMPAT_DEBUG_ALL` (fallback: `SHARUN_OLD_KERNEL_COMPAT_DEBUG_ALL`): `1` also logs every syscall and its return value (very noisy and slow).
+- `OLD_KERNEL_COMPAT_ACTIVE` (set automatically by the layer): holds the active tracer PID for child processes (see `ENV_ACTIVE` / `is_active()`).
 
 ## License
 

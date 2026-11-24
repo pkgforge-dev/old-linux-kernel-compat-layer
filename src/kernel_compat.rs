@@ -440,12 +440,45 @@ fn syscall_table_max() -> u64 {
 }
 
 /// Whether the compatibility tracer should run for this launch.
+///
+/// Always returns `false` when this process is already covered by an active
+/// compatibility tracer (so nested consumers of this crate do not attempt to
+/// trace or emulate syscalls a second time).
 pub fn enabled() -> bool {
+	if is_active() {
+		return false
+	}
 	let cfg = config();
 	match env_var_with_fallback(cfg.env_enable, cfg.env_enable_fallback).as_deref() {
 		Some("0") => false,
 		Some(_) => true,
 		None => needs_compat(),
+	}
+}
+
+/// Whether this process is already running under an active compatibility
+/// tracer.
+///
+/// Detection uses two independent signals:
+///
+/// 1. `/proc/self/status` `TracerPid != 0` — authoritative whenever `/proc` is
+///    readable, even if an intermediate process stripped the environment or ran
+///    under an older binary that did not export `OLD_KERNEL_COMPAT_ACTIVE`.
+///    Also catches any external ptrace tracer (e.g. `strace`/`gdb`), where
+///    nested `PTRACE_TRACEME` would fail with `EPERM` anyway.
+/// 2. `OLD_KERNEL_COMPAT_ACTIVE=<pid>` — fallback when `/proc/self/status` is
+///    unavailable (e.g. inside a container or chroot without `/proc`). When
+///    `/proc/self/status` *is* readable and reports `TracerPid: 0`, a leftover
+///    `OLD_KERNEL_COMPAT_ACTIVE` is treated as stale and ignored so a detached
+///    or post-tracer process is not left unprotected.
+pub fn is_active() -> bool {
+	match tracer_pid() {
+		Some(pid) if pid != 0 => true,
+		Some(_) => false,
+		None => env::var(crate::ENV_ACTIVE)
+			.ok()
+			.and_then(|v| v.parse::<i32>().ok())
+			.is_some_and(|pid| pid > 0),
 	}
 }
 
@@ -490,10 +523,11 @@ pub fn run_command_traced(args: &[String]) -> ! {
 /// the traced child so the caller continues under the compatibility layer.
 pub fn enter_traced() {
 	let prefix = config().log_prefix;
-	// Already running under a tracer: the outer tracer follows forks and covers
-	// this process too, so continue directly without nesting ptrace or printing
-	// a misleading "ptrace unavailable" warning.
-	if already_traced() {
+	// Already covered by an outer tracer: the outer supervisor follows forks
+	// and execs, so continue directly without nesting ptrace, reinstalling a
+	// second seccomp filter, or printing a misleading "ptrace unavailable"
+	// warning.
+	if is_active() {
 		return;
 	}
 	// If ptrace is blocked (e.g. a container's seccomp policy), don't turn a
@@ -512,6 +546,7 @@ pub fn enter_traced() {
 	// syscalls (seccomp, cheap) or on every syscall (fallback).
 	let mut pipe_fds = [0i32; 2];
 	let have_pipe = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0;
+	let tracer_pid = std::process::id();
 
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
@@ -532,6 +567,9 @@ pub fn enter_traced() {
 					libc::close(pipe_fds[1]);
 				}
 			}
+			// Mark the traced subtree so child binaries built with this crate
+			// can detect an active layer even if `/proc` is hidden from them.
+			env::set_var(crate::ENV_ACTIVE, tracer_pid.to_string());
 			// Let the parent install PTRACE_SETOPTIONS before we run.
 			let _ = raise(Signal::SIGSTOP);
 		},
@@ -561,18 +599,16 @@ pub fn run_traced(launch: &dyn Fn()) -> ! {
 	exit(1)
 }
 
-/// True when this process already has a ptrace tracer attached (`TracerPid != 0`
-/// in `/proc/self/status`).
-fn already_traced() -> bool {
-	let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-		return false
-	};
+/// Read `TracerPid` from `/proc/self/status`, or `None` if `/proc/self/status`
+/// cannot be read or parsed.
+fn tracer_pid() -> Option<i32> {
+	let status = std::fs::read_to_string("/proc/self/status").ok()?;
 	for line in status.lines() {
 		if let Some(rest) = line.strip_prefix("TracerPid:") {
-			return rest.trim().parse::<i32>().is_ok_and(|pid| pid != 0);
+			return rest.trim().parse::<i32>().ok();
 		}
 	}
-	false
+	None
 }
 
 /// Cheap probe for whether `PTRACE_TRACEME` is permitted here.

@@ -17,6 +17,18 @@ mod kernel_compat;
 
 use std::process::exit;
 
+/// Environment variable exported to the traced child process while the
+/// compatibility layer is active.
+///
+/// The value is `"<tracer_pid>"` (the PID of the supervising tracer process).
+/// Any descendant process that also embeds this crate checks both this variable
+/// and `/proc/self/status` (`TracerPid`), so it never attempts to start a second
+/// tracer, reinstall a seccomp filter, or print a spurious "ptrace unavailable"
+/// warning. Because the variable carries the tracer PID and is verified against
+/// `TracerPid` (when `/proc` is mounted), a stale value inherited by a detached
+/// process or after a tracer exits cannot silently disable protection.
+pub const ENV_ACTIVE: &str = "OLD_KERNEL_COMPAT_ACTIVE";
+
 /// Internal-only flag used by the `PR_SET_NO_NEW_PRIVS` + `execve` probe.
 ///
 /// The probe re-executes `/proc/self/exe` with this argument to check whether
@@ -114,11 +126,27 @@ fn current_probe_flag() -> &'static str {
 
 /// Whether the compatibility layer should be activated for this launch.
 ///
-/// Always returns `false` on non-`x86_64` targets.
+/// Returns `false` if this process is already covered by an active
+/// compatibility tracer (see [`is_active`]), or on non-`x86_64` targets.
 pub fn enabled() -> bool {
 	#[cfg(target_arch = "x86_64")]
 	{
 		kernel_compat::enabled()
+	}
+	#[cfg(not(target_arch = "x86_64"))]
+	{
+		false
+	}
+}
+
+/// Whether this process is already running under an active compatibility
+/// tracer (or another ptrace tracer attached to it).
+///
+/// Always returns `false` on non-`x86_64` targets.
+pub fn is_active() -> bool {
+	#[cfg(target_arch = "x86_64")]
+	{
+		kernel_compat::is_active()
 	}
 	#[cfg(not(target_arch = "x86_64"))]
 	{
