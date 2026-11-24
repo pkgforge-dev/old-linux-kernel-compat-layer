@@ -9,4 +9,4 @@ keywords = ["linux", "kernel", "compat", "ptrace", "seccomp"]
 categories = ["os::linux-apis"]
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
-nix = { version = "0.31", features = ["fs", "ptrace", "signal", "process"] }
+nix = { version = "0.32", features = ["fs", "ptrace", "signal", "process"] }
