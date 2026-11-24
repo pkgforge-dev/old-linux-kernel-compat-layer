@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Build, Clippy & Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust targets
+        run: |
+          rustup component add clippy
+          rustup target add aarch64-unknown-linux-musl riscv64gc-unknown-linux-musl
+
+      - name: Install qemu-user
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user
+
+      - name: Clippy (x86_64)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build examples & run tests (x86_64)
+        run: |
+          cargo build --examples
+          cargo test
+
+      - name: Doc check (x86_64)
+        run: cargo doc --no-deps
+
+      - name: Clippy, build & unit tests (aarch64)
+        env:
+          RUSTFLAGS: "-C linker=rust-lld -C linker-flavor=ld.lld -C link-self-contained=yes"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER: qemu-aarch64
+        run: |
+          cargo clippy --target aarch64-unknown-linux-musl --all-targets -- -D warnings
+          cargo test --target aarch64-unknown-linux-musl --lib
+          cargo build --target aarch64-unknown-linux-musl --examples
+          cargo doc --target aarch64-unknown-linux-musl --no-deps
+
+      - name: Check no-op shim target (riscv64)
+        run: |
+          cargo check --target riscv64gc-unknown-linux-musl --all-targets
+          cargo clippy --target riscv64gc-unknown-linux-musl --all-targets -- -D warnings
