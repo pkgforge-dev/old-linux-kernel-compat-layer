@@ -1,0 +1,12 @@
+[package]
+name = "old-linux-kernel-compat-layer"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/pkgforge-dev/old-linux-kernel-compat-layer"
+description = "Ptrace/seccomp-based compatibility layer for running modern Linux binaries on ancient x86_64 kernels (down to Linux 2.6.8)"
+keywords = ["linux", "kernel", "compat", "ptrace", "seccomp"]
+categories = ["os::linux-apis"]
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+nix = { version = "0.31", features = ["fs", "ptrace", "signal", "process"] }
