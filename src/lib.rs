@@ -17,16 +17,13 @@ mod kernel_compat;
 
 use std::process::exit;
 
-/// Environment variable exported to the traced child process while the
+/// Environment variable set to `"1"` in the traced child process while the
 /// compatibility layer is active.
 ///
-/// The value is `"<tracer_pid>"` (the PID of the supervising tracer process).
-/// Any descendant process that also embeds this crate checks both this variable
-/// and `/proc/self/status` (`TracerPid`), so it never attempts to start a second
-/// tracer, reinstall a seccomp filter, or print a spurious "ptrace unavailable"
-/// warning. Because the variable carries the tracer PID and is verified against
-/// `TracerPid` (when `/proc` is mounted), a stale value inherited by a detached
-/// process or after a tracer exits cannot silently disable protection.
+/// Any descendant binary that also embeds this crate checks this variable in
+/// [`is_active`] (and automatically in [`enabled`], [`enter`], [`run_traced`],
+/// and [`run_command_traced`]) so it does not attempt to start a second tracer
+/// or emulate syscalls a second time. Works even on systems without `/proc`.
 pub const ENV_ACTIVE: &str = "OLD_KERNEL_COMPAT_ACTIVE";
 
 /// Internal-only flag used by the `PR_SET_NO_NEW_PRIVS` + `execve` probe.
@@ -140,7 +137,7 @@ pub fn enabled() -> bool {
 }
 
 /// Whether this process is already running under an active compatibility
-/// tracer (or another ptrace tracer attached to it).
+/// layer (`OLD_KERNEL_COMPAT_ACTIVE=1`).
 ///
 /// Always returns `false` on non-`x86_64` targets.
 pub fn is_active() -> bool {
@@ -177,8 +174,8 @@ pub fn kernel_lt(major: u64, minor: u64, patch: u64) -> bool {
 /// compatibility layer.
 ///
 /// Returns immediately without forking when the layer is disabled, already
-/// active (`TracerPid != 0`), `ptrace` is unavailable, or on non-`x86_64`
-/// targets.
+/// active (`OLD_KERNEL_COMPAT_ACTIVE=1`), `ptrace` is unavailable, or on
+/// non-`x86_64` targets.
 pub fn enter() {
 	#[cfg(target_arch = "x86_64")]
 	{
@@ -191,8 +188,9 @@ pub fn enter() {
 /// Fork a supervisor process and run `launch` inside the traced child, never
 /// returning.
 ///
-/// If this process is already traced (`TracerPid != 0`), if `ptrace` is
-/// unavailable, or on non-`x86_64` architectures, `launch` is invoked directly.
+/// If the layer is already active (`OLD_KERNEL_COMPAT_ACTIVE=1`), if `ptrace`
+/// is unavailable, or on non-`x86_64` architectures, `launch` is invoked
+/// directly.
 pub fn run_traced(launch: &dyn Fn()) -> ! {
 	#[cfg(target_arch = "x86_64")]
 	{

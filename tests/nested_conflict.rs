@@ -12,7 +12,6 @@ fn example_bin(name: &str) -> PathBuf {
 	if bin.exists() {
 		return bin;
 	}
-	// Fallback: walk up from current_exe looking for an `examples/<name>` sibling.
 	if let Ok(exe) = std::env::current_exe() {
 		for ancestor in exe.ancestors().skip(1) {
 			let candidate = ancestor.join("examples").join(name);
@@ -58,74 +57,59 @@ fn nested_app_with_different_config_does_not_nest_tracer() {
 		"spurious ptrace warning:\n{stderr}"
 	);
 
-	// Inside inner app: already active, enabled() == false, OLD_KERNEL_COMPAT_ACTIVE exported with numeric PID.
 	assert!(
-		stdout.contains("before:active=true,enabled=false,env="),
-		"unexpected stdout:\n{stdout}"
-	);
-	assert!(!stdout.contains("env=unset"), "OLD_KERNEL_COMPAT_ACTIVE not exported:\n{stdout}");
-}
-
-#[test]
-fn nested_app_still_suppressed_even_when_env_is_cleared() {
-	let outer = example_bin("compat-exec");
-	let inner = example_bin("nested-probe");
-
-	// Clear the entire environment between outer and inner, then re-force INNER_COMPAT=1.
-	// TracerPid in /proc/self/status must still prevent double tracing.
-	let out = Command::new(&outer)
-		.args(["/usr/bin/env", "-i", "INNER_COMPAT=1"])
-		.arg(&inner)
-		.arg("run-traced")
-		.env("OLD_KERNEL_COMPAT", "1")
-		.output()
-		.expect("run outer -> env -i -> inner");
-
-	assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-	let stdout = String::from_utf8_lossy(&out.stdout);
-	let stderr = String::from_utf8_lossy(&out.stderr);
-
-	assert_eq!(
-		stderr.matches("enabled old kernel compatibility mode").count(),
-		1,
-		"unexpected stderr:\n{stderr}"
-	);
-	assert!(!stderr.contains("ptrace unavailable"), "stderr:\n{stderr}");
-	assert!(
-		stdout.contains("before:active=true,enabled=false,env=unset;after:active=true"),
+		stdout.contains("before:active=true,enabled=false,env=1;after:active=true,env=1"),
 		"unexpected stdout:\n{stdout}"
 	);
 }
 
 #[test]
-fn stale_env_marker_without_live_tracer_does_not_disable_layer() {
+fn env_active_suppresses_tracer_without_reading_proc() {
 	let inner = example_bin("nested-probe");
 
-	// Simulate a leaked OLD_KERNEL_COMPAT_ACTIVE from an exited/detached parent
-	// while no tracer is actually attached (TracerPid == 0).
 	let out = Command::new(&inner)
-		.arg("enter")
-		.env("OLD_KERNEL_COMPAT_ACTIVE", "999999")
+		.arg("run-traced")
+		.env("OLD_KERNEL_COMPAT_ACTIVE", "1")
 		.env("INNER_COMPAT", "1")
 		.output()
-		.expect("run inner with stale env");
+		.expect("run inner with OLD_KERNEL_COMPAT_ACTIVE=1");
 
 	assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
 	let stdout = String::from_utf8_lossy(&out.stdout);
 	let stderr = String::from_utf8_lossy(&out.stderr);
 
-	// Must ignore the stale env var and start its own tracer.
+	assert!(
+		!stderr.contains("enabled old kernel compatibility mode"),
+		"should not start tracer when OLD_KERNEL_COMPAT_ACTIVE=1; stderr:\n{stderr}"
+	);
+	assert!(
+		stdout.contains("before:active=true,enabled=false,env=1;after:active=true"),
+		"unexpected stdout:\n{stdout}"
+	);
+}
+
+#[test]
+fn standalone_app_sets_env_active_when_entering() {
+	let inner = example_bin("nested-probe");
+
+	let out = Command::new(&inner)
+		.arg("enter")
+		.env_remove("OLD_KERNEL_COMPAT_ACTIVE")
+		.env("INNER_COMPAT", "1")
+		.output()
+		.expect("run standalone inner");
+
+	assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+
 	assert_eq!(
 		stderr.matches("[inner] enabled old kernel compatibility mode").count(),
 		1,
-		"expected inner tracer to start despite stale env; stderr:\n{stderr}"
+		"expected inner tracer to start; stderr:\n{stderr}"
 	);
 	assert!(
-		stdout.contains("before:active=false,enabled=true,env=999999;after:active=true,env="),
+		stdout.contains("before:active=false,enabled=true,env=unset;after:active=true,env=1"),
 		"unexpected stdout:\n{stdout}"
-	);
-	assert!(
-		!stdout.contains("after:active=true,env=999999"),
-		"env marker should be updated to the new tracer pid:\n{stdout}"
 	);
 }

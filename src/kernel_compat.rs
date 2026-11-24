@@ -457,29 +457,13 @@ pub fn enabled() -> bool {
 }
 
 /// Whether this process is already running under an active compatibility
-/// tracer.
+/// layer (`OLD_KERNEL_COMPAT_ACTIVE=1`).
 ///
-/// Detection uses two independent signals:
-///
-/// 1. `/proc/self/status` `TracerPid != 0` — authoritative whenever `/proc` is
-///    readable, even if an intermediate process stripped the environment or ran
-///    under an older binary that did not export `OLD_KERNEL_COMPAT_ACTIVE`.
-///    Also catches any external ptrace tracer (e.g. `strace`/`gdb`), where
-///    nested `PTRACE_TRACEME` would fail with `EPERM` anyway.
-/// 2. `OLD_KERNEL_COMPAT_ACTIVE=<pid>` — fallback when `/proc/self/status` is
-///    unavailable (e.g. inside a container or chroot without `/proc`). When
-///    `/proc/self/status` *is* readable and reports `TracerPid: 0`, a leftover
-///    `OLD_KERNEL_COMPAT_ACTIVE` is treated as stale and ignored so a detached
-///    or post-tracer process is not left unprotected.
+/// Uses an environment variable rather than `/proc/self/status` so it works on
+/// minimal or old systems where `/proc` is not mounted, and does not confuse an
+/// unrelated debugger (`gdb`/`strace`) with an active compatibility layer.
 pub fn is_active() -> bool {
-	match tracer_pid() {
-		Some(pid) if pid != 0 => true,
-		Some(_) => false,
-		None => env::var(crate::ENV_ACTIVE)
-			.ok()
-			.and_then(|v| v.parse::<i32>().ok())
-			.is_some_and(|pid| pid > 0),
-	}
+	matches!(env::var(crate::ENV_ACTIVE).as_deref(), Ok("1"))
 }
 
 /// Auto mode: run the tracer when the kernel is old enough to plausibly need it.
@@ -546,7 +530,6 @@ pub fn enter_traced() {
 	// syscalls (seccomp, cheap) or on every syscall (fallback).
 	let mut pipe_fds = [0i32; 2];
 	let have_pipe = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0;
-	let tracer_pid = std::process::id();
 
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
@@ -568,8 +551,8 @@ pub fn enter_traced() {
 				}
 			}
 			// Mark the traced subtree so child binaries built with this crate
-			// can detect an active layer even if `/proc` is hidden from them.
-			env::set_var(crate::ENV_ACTIVE, tracer_pid.to_string());
+			// know a compatibility layer is already active.
+			env::set_var(crate::ENV_ACTIVE, "1");
 			// Let the parent install PTRACE_SETOPTIONS before we run.
 			let _ = raise(Signal::SIGSTOP);
 		},
@@ -597,18 +580,6 @@ pub fn run_traced(launch: &dyn Fn()) -> ! {
 	enter_traced();
 	launch();
 	exit(1)
-}
-
-/// Read `TracerPid` from `/proc/self/status`, or `None` if `/proc/self/status`
-/// cannot be read or parsed.
-fn tracer_pid() -> Option<i32> {
-	let status = std::fs::read_to_string("/proc/self/status").ok()?;
-	for line in status.lines() {
-		if let Some(rest) = line.strip_prefix("TracerPid:") {
-			return rest.trim().parse::<i32>().ok();
-		}
-	}
-	None
 }
 
 /// Cheap probe for whether `PTRACE_TRACEME` is permitted here.
