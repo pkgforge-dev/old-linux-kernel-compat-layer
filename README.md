@@ -1,12 +1,19 @@
 # old-linux-kernel-compat-layer
 
-A minimal ptrace/seccomp-based compatibility layer (Rust crate, `x86_64` Linux) for running binaries built against a modern glibc (such as an Arch Linux `--enable-kernel=4.4` glibc) on ancient Linux kernels, down to **Linux 2.6.8**.
+A minimal ptrace/seccomp-based compatibility layer (Rust crate, `x86_64` and `aarch64` Linux) for running binaries built against a modern glibc (such as an Arch Linux `--enable-kernel=4.4` glibc) on ancient Linux kernels:
+
+- **`x86_64`**: down to **Linux 2.6.8** (Debian 3.1)
+- **`aarch64`**: down to **Linux 3.11** (Ubuntu 13.10 Saucy Salamander, the first Ubuntu release with `arm64`)
 
 This layer was originally written inside [Anylinux-sharun](https://github.com/pkgforge-dev/Anylinux-sharun) and was split off into its own crate so that other projects can reuse it directly without duplicating the tracer or shelling out to `sharun`.
 
 ## What it handles
 
-Modern binaries and libc builds both execute instructions old kernels do not enable and call syscalls that did not exist yet. The layer catches `SIGILL` to emulate unsupported instructions (`XGETBV` with `XCR0 = 0`) and intercepts missing syscalls at trace time. Most syscalls are rewritten in place to an older equivalent; syscalls that no single older call can answer are emulated with a short sequence of injected syscalls inside the traced process. Each translation is gated on a one-time probe (or a kernel version check when there is nothing reliable to probe):
+Modern binaries and libc builds both execute instructions old kernels do not enable and call syscalls that did not exist yet. The layer catches `SIGILL` to emulate unsupported instructions and intercepts missing syscalls at trace time. Each translation is gated on a one-time probe (or a kernel version check when there is nothing reliable to probe).
+
+### `x86_64` (down to Linux 2.6.8)
+
+Most syscalls are rewritten in place to an older equivalent; syscalls that no single older call can answer are emulated with a short sequence of injected syscalls inside the traced process. `SIGILL` emulates `XGETBV` with `XCR0 = 0`.
 
 - **`FUTEX_WAIT_BITSET` / `FUTEX_WAKE_BITSET`** (2.6.25) -> `FUTEX_WAIT` / `FUTEX_WAKE`, and **`FUTEX_CLOCK_REALTIME`** waits (2.6.29) -> plain waits with a relative timeout.
 - **`O_CLOEXEC`** (2.6.23) cleared from `open` and `openat` flags on pre-2.6.23 kernels (avoids vendor kernels such as Fedora Core 3/4 returning errno 530 instead of `ENOENT`).
@@ -27,11 +34,21 @@ Modern binaries and libc builds both execute instructions old kernels do not ena
 - **Echoed syscall numbers** on pre-2.6.19 traced `x86_64` kernels -> normalized back to `-ENOSYS` for unimplemented syscalls above the kernel's syscall table.
 - **Linux 2.6.12 duplicate syscall-exit stops** -> skipped without desynchronizing entry/exit pairing.
 
+### `aarch64` (down to Linux 3.11)
+
+`arm64` entered mainline Linux in 3.7 with the `asm-generic` syscall ABI, so all pre-3.11 syscalls (`*at`, `futex` bitset/realtime, `pipe2`, `epoll_*`, `ppoll`, `prlimit64`, `eventfd2`, `timerfd_*`, `pwritev`/`preadv`, `F_DUPFD_CLOEXEC`, `termios2`, `O_CLOEXEC`, `CLOCK_BOOTTIME`/`*_COARSE`) are already present in Linux 3.11. The `aarch64` backend handles the post-3.11 gaps:
+
+- **`getrandom`** (3.17) -> filled from `/dev/urandom` at syscall exit.
+- **`statx`** (4.11) -> `newfstatat` / `fstat`, translating the `asm-generic` 64-bit `struct stat` (128 bytes) into `struct statx`:
+  - On Linux >= 3.19, rewritten in place at entry/seccomp stop via `PTRACE_SETREGSET(NT_ARM_SYSTEM_CALL)`.
+  - On Linux 3.11–3.18 (before `NT_ARM_SYSTEM_CALL` existed), replayed via `svc #0` once `statx` returns `-ENOSYS`, then original registers are restored.
+- **`SIGILL` on `MRS` of EL1 CPU ID registers** (`HWCAP_CPUID`, added in 4.11) -> emulated as returning `0` (no optional extensions) and advancing `pc` by 4.
+
 ## Behavior & limits
 
-- **`x86_64` Linux only.** On other architectures the crate still compiles cleanly as a no-op shim (`enabled()` returns `false`, `enter()` is a no-op, `run_traced` / `run_command_traced` run the target directly).
-- **No 32-bit translation.** 32-bit tracees are traced and have their signals forwarded, but their syscalls are never rewritten.
-- **Seccomp vs. ptrace fallback.** On kernels with seccomp-bpf (3.5+), only the needed syscalls trap into the tracer (this sets `no_new_privs`, so setuid helpers cannot gain privileges). Older kernels fall back to tracing every syscall with ptrace.
+- **`x86_64` and `aarch64` Linux.** On other architectures the crate compiles cleanly as a no-op shim (`enabled()` returns `false`, `enter()` is a no-op, `run_traced` / `run_command_traced` run the target directly).
+- **No 32-bit translation.** 32-bit tracees (`i386` on `x86_64`, `AArch32` on `aarch64`) are traced and have their signals forwarded, but their syscalls and instructions are never rewritten.
+- **Seccomp vs. ptrace fallback.** On kernels with seccomp-bpf (`x86_64` 3.5+, `aarch64` 3.19+), only the needed syscalls trap into the tracer (this sets `no_new_privs`, so setuid helpers cannot gain privileges). Older kernels fall back to tracing every syscall with ptrace.
 - **Nested / multi-process conflict prevention.** When the layer activates, it sets `OLD_KERNEL_COMPAT_ACTIVE=1` (`ENV_ACTIVE`) in the traced child process. Any descendant binary built with this crate checks that environment variable in `is_active()` (and automatically in `enabled()`, `enter()`, `run_traced()`, and `run_command_traced()`), so it skips starting a second tracer or emulating syscalls again — even on minimal systems without `/proc` or when outer and inner binaries use different `Config` env var names.
 
 ## Usage

@@ -1,18 +1,26 @@
 //! Minimal ptrace/seccomp-based compatibility layer for running modern Linux
 //! binaries (such as binaries built against a modern `--enable-kernel=4.4`
-//! glibc) on ancient x86_64 Linux kernels, down to Linux 2.6.8.
+//! glibc) on ancient Linux kernels:
+//!
+//! - `x86_64`: down to **Linux 2.6.8**
+//! - `aarch64`: down to **Linux 3.11** (Ubuntu 13.10, the first Ubuntu release
+//!   with `arm64`)
 //!
 //! Originally developed inside
 //! [Anylinux-sharun](https://github.com/pkgforge-dev/Anylinux-sharun) and split
 //! into a standalone crate so other projects can embed the same layer directly.
 //!
-//! On non-`x86_64` architectures this crate compiles cleanly as a no-op shim:
+//! On other architectures this crate compiles cleanly as a no-op shim:
 //! [`enabled`] returns `false`, [`enter`] is a no-op, and [`run_traced`] /
 //! [`run_command_traced`] execute the target directly without tracing.
 
 #[cfg(target_arch = "x86_64")]
 mod emulated_syscalls;
 #[cfg(target_arch = "x86_64")]
+mod kernel_compat;
+
+#[cfg(target_arch = "aarch64")]
+#[path = "kernel_compat_aarch64.rs"]
 mod kernel_compat;
 
 use std::process::exit;
@@ -79,11 +87,11 @@ impl Default for Config {
 ///
 /// Only the first call takes effect; subsequent calls return `Err(config)`.
 pub fn init(config: Config) -> Result<(), Config> {
-	#[cfg(target_arch = "x86_64")]
+	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 	{
 		kernel_compat::init(config)
 	}
-	#[cfg(not(target_arch = "x86_64"))]
+	#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 	{
 		let _ = config;
 		Ok(())
@@ -111,11 +119,11 @@ where
 }
 
 fn current_probe_flag() -> &'static str {
-	#[cfg(target_arch = "x86_64")]
+	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 	{
 		kernel_compat::config().nnp_probe_flag
 	}
-	#[cfg(not(target_arch = "x86_64"))]
+	#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 	{
 		NNP_PROBE_FLAG
 	}
@@ -124,13 +132,13 @@ fn current_probe_flag() -> &'static str {
 /// Whether the compatibility layer should be activated for this launch.
 ///
 /// Returns `false` if this process is already covered by an active
-/// compatibility tracer (see [`is_active`]), or on non-`x86_64` targets.
+/// compatibility tracer (see [`is_active`]), or on unsupported targets.
 pub fn enabled() -> bool {
-	#[cfg(target_arch = "x86_64")]
+	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 	{
 		kernel_compat::enabled()
 	}
-	#[cfg(not(target_arch = "x86_64"))]
+	#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 	{
 		false
 	}
@@ -139,13 +147,13 @@ pub fn enabled() -> bool {
 /// Whether this process is already running under an active compatibility
 /// layer (`OLD_KERNEL_COMPAT_ACTIVE=1`).
 ///
-/// Always returns `false` on non-`x86_64` targets.
+/// Always returns `false` on unsupported targets.
 pub fn is_active() -> bool {
-	#[cfg(target_arch = "x86_64")]
+	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 	{
 		kernel_compat::is_active()
 	}
-	#[cfg(not(target_arch = "x86_64"))]
+	#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 	{
 		false
 	}
@@ -153,11 +161,11 @@ pub fn is_active() -> bool {
 
 /// Whether the running kernel is older than `(major, minor, patch)`.
 pub fn kernel_lt(major: u64, minor: u64, patch: u64) -> bool {
-	#[cfg(target_arch = "x86_64")]
+	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 	{
 		kernel_compat::kernel_lt(major, minor, patch)
 	}
-	#[cfg(not(target_arch = "x86_64"))]
+	#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 	{
 		let _ = (major, minor, patch);
 		false
@@ -175,9 +183,9 @@ pub fn kernel_lt(major: u64, minor: u64, patch: u64) -> bool {
 ///
 /// Returns immediately without forking when the layer is disabled, already
 /// active (`OLD_KERNEL_COMPAT_ACTIVE=1`), `ptrace` is unavailable, or on
-/// non-`x86_64` targets.
+/// unsupported targets.
 pub fn enter() {
-	#[cfg(target_arch = "x86_64")]
+	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 	{
 		if kernel_compat::enabled() {
 			kernel_compat::enter_traced();
@@ -189,14 +197,14 @@ pub fn enter() {
 /// returning.
 ///
 /// If the layer is already active (`OLD_KERNEL_COMPAT_ACTIVE=1`), if `ptrace`
-/// is unavailable, or on non-`x86_64` architectures, `launch` is invoked
+/// is unavailable, or on unsupported architectures, `launch` is invoked
 /// directly.
 pub fn run_traced(launch: &dyn Fn()) -> ! {
-	#[cfg(target_arch = "x86_64")]
+	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 	{
 		kernel_compat::run_traced(launch)
 	}
-	#[cfg(not(target_arch = "x86_64"))]
+	#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 	{
 		launch();
 		exit(1)
@@ -207,11 +215,11 @@ pub fn run_traced(launch: &dyn Fn()) -> ! {
 /// under the compatibility tracer if [`enabled`] is true, or `exec` it directly
 /// otherwise. Never returns.
 pub fn run_command_traced(args: &[String]) -> ! {
-	#[cfg(target_arch = "x86_64")]
+	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 	{
 		kernel_compat::run_command_traced(args)
 	}
-	#[cfg(not(target_arch = "x86_64"))]
+	#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 	{
 		if args.is_empty() {
 			eprintln!("[kernel-compat] no command specified");
