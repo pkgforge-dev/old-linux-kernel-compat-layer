@@ -19,6 +19,7 @@ Most syscalls are rewritten in place to an older equivalent; syscalls that no si
 - **`O_CLOEXEC`** (2.6.23) cleared from `open` and `openat` flags on pre-2.6.23 kernels (avoids vendor kernels such as Fedora Core 3/4 returning errno 530 instead of `ENOENT`).
 - **`clone(CLONE_THREAD)`** (2.6.2) gets `CLONE_DETACHED` added on 2.6.0 and 2.6.1, which refuse a thread without it (glibc's `pthread_create` never sets it).
 - **`pipe2`** (2.6.27) -> emulated as `pipe` + `fcntl` so `O_NONBLOCK` and `O_CLOEXEC` are preserved (`O_DIRECT` falls back to plain `pipe`).
+- **`socket` / `socketpair` / `accept4`** (`SOCK_NONBLOCK` and `SOCK_CLOEXEC` in 2.6.27, `accept4` in 2.6.28) -> emulated as the plain call + `fcntl`. Older kernels fail the flagged call with `EINVAL`, which Go and other modern runtimes treat as fatal.
 - **The `*at` syscall family** (2.6.16: `openat`, `newfstatat`, `mkdirat`, `mknodat`, `fchownat`, `futimesat`, `unlinkat`, `renameat`, `linkat`, `symlinkat`, `readlinkat`, `fchmodat`, `faccessat`) -> plain syscalls, rebuilding dirfd-relative paths through `/proc/self/fd/<fd>/<path>` (needs `/proc`).
 - **`statx`** (4.11) -> `newfstatat` / `fstat` (or `stat` / `lstat` / `fstat` where `newfstatat` is also missing), translating `struct stat` into `struct statx`.
 - **`getrandom`** (3.17) -> filled from `/dev/urandom`.

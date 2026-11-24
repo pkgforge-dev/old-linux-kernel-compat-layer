@@ -122,6 +122,14 @@ enum Step {
 	/// array, and the tracer only reads them back to name the ends for the
 	/// steps that follow. No timerfd bookkeeping.
 	PlainPipe { buffer: u64 },
+	/// socket(domain, type, protocol) for a socket/accept4 emulation: the type
+	/// has no SOCK_* flags left, the steps that follow apply them.
+	PlainSocket { domain: u64, kind: u64, protocol: u64 },
+	/// socketpair(domain, type, protocol, buffer), same idea: the fds go straight
+	/// to the caller's array and the tracer reads them back to name the ends.
+	PlainSocketpair { domain: u64, kind: u64, protocol: u64, buffer: u64 },
+	/// accept(fd, addr, length): the call underneath accept4.
+	PlainAccept { fd: u64, addr: u64, length: u64 },
 	Attach { fd: Which, addr: u64, length: u64, connect: bool },
 	Nonblock { fd: Which },
 	WriteInitial { fd: Which, buffer: u64 },
@@ -262,6 +270,9 @@ impl Emulations {
 			nr if nr == libc::SYS_timerfd_gettime as u64 => self.timerfd_gettime(pid, regs),
 			nr if nr == libc::SYS_fcntl as u64 => self.dupfd_cloexec(pid, regs),
 			nr if nr == libc::SYS_pipe2 as u64 => self.pipe2(pid, regs),
+			nr if nr == libc::SYS_socket as u64 => self.socket(pid, regs),
+			nr if nr == libc::SYS_socketpair as u64 => self.socketpair(pid, regs),
+			nr if nr == libc::SYS_accept4 as u64 => self.accept4(pid, regs),
 			nr if nr == libc::SYS_pwritev as u64 => self.vector_io(pid, regs, true),
 			nr if nr == libc::SYS_preadv as u64 => self.vector_io(pid, regs, false),
 			nr if nr == libc::SYS_epoll_pwait as u64 => self.epoll_pwait(pid, regs),
@@ -385,6 +396,65 @@ impl Emulations {
 		}
 		if debug() {
 			eprintln!("kernel-compat: pipe2(flags {flags:#x}) emulated as pipe + fcntl");
+		}
+		self.start_sequence(pid, regs, gadget, queue, Outcome::Call(0), 0)
+	}
+
+	/// socket(domain, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol) (2.6.27) ->
+	/// socket, then the flags with fcntl. Older kernels reject a type with those
+	/// bits as EINVAL, which Go and other modern runtimes treat as fatal.
+	fn socket(&mut self, pid: Pid, regs: libc::user_regs_struct) -> bool {
+		let kind = regs.rsi;
+		if kind & SOCK_FLAGS == 0 || !sock_flags_missing() {
+			return false;
+		}
+		let Some(gadget) = gadget_for(pid, regs) else { return false };
+		let mut queue = VecDeque::from([Step::PlainSocket {
+			domain: regs.rdi,
+			kind: kind & !SOCK_FLAGS,
+			protocol: regs.rdx,
+		}]);
+		queue.extend(flag_steps(kind, Which::Result));
+		if debug() {
+			eprintln!("kernel-compat: socket(type {kind:#x}) emulated as socket + fcntl");
+		}
+		self.start_sequence(pid, regs, gadget, queue, Outcome::Call(0), 0)
+	}
+
+	/// socketpair(domain, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol, sv)
+	/// (2.6.27) -> socketpair, then the flags on both ends.
+	fn socketpair(&mut self, pid: Pid, regs: libc::user_regs_struct) -> bool {
+		let kind = regs.rsi;
+		if kind & SOCK_FLAGS == 0 || !sock_flags_missing() {
+			return false;
+		}
+		let Some(gadget) = gadget_for(pid, regs) else { return false };
+		let mut queue = VecDeque::from([Step::PlainSocketpair {
+			domain: regs.rdi,
+			kind: kind & !SOCK_FLAGS,
+			protocol: regs.rdx,
+			buffer: regs.r10,
+		}]);
+		queue.extend(flag_steps(kind, Which::ReadEnd));
+		queue.extend(flag_steps(kind, Which::WriteEnd));
+		if debug() {
+			eprintln!("kernel-compat: socketpair(type {kind:#x}) emulated as socketpair + fcntl");
+		}
+		self.start_sequence(pid, regs, gadget, queue, Outcome::Call(0), 0)
+	}
+
+	/// accept4(fd, addr, length, flags) (2.6.28) -> accept, then the flags.
+	fn accept4(&mut self, pid: Pid, regs: libc::user_regs_struct) -> bool {
+		let flags = regs.r10;
+		if flags & !SOCK_FLAGS != 0 || !accept4_missing() {
+			return false;
+		}
+		let Some(gadget) = gadget_for(pid, regs) else { return false };
+		let mut queue =
+			VecDeque::from([Step::PlainAccept { fd: regs.rdi, addr: regs.rsi, length: regs.rdx }]);
+		queue.extend(flag_steps(flags, Which::Result));
+		if debug() {
+			eprintln!("kernel-compat: accept4(flags {flags:#x}) emulated as accept + fcntl");
 		}
 		self.start_sequence(pid, regs, gadget, queue, Outcome::Call(0), 0)
 	}
@@ -619,7 +689,13 @@ impl Emulations {
 				results.push(regs.rax as i64);
 				let step = running.take();
 				if results.len() == 1
-					&& matches!(step, Some(Step::Socket) | Some(Step::FcntlDupfd { .. }))
+					&& matches!(
+						step,
+						Some(Step::Socket)
+							| Some(Step::PlainSocket { .. })
+							| Some(Step::PlainAccept { .. })
+							| Some(Step::FcntlDupfd { .. })
+					)
 				{
 					*fd = regs.rax as i64;
 				}
@@ -658,9 +734,9 @@ impl Emulations {
 			}
 		}
 
-		// A pipe2 emulation: the caller's array now holds the fds the next steps
-		// have to work on.
-		if let Some(Step::PlainPipe { buffer }) = completed {
+		// A pipe2 or socketpair emulation: the caller's array now holds the fds
+		// the next steps have to work on.
+		if let Some(Step::PlainPipe { buffer } | Step::PlainSocketpair { buffer, .. }) = completed {
 			let ends = match &active {
 				Active::Sequence { results, .. } if results.last().is_some_and(|rc| *rc >= 0) => {
 					pipe_ends(pid, buffer)
@@ -883,6 +959,15 @@ fn build(step: &Step, active: &Active) -> (u64, [u64; 6]) {
 		Step::Pipe { buffer } | Step::PlainPipe { buffer } => {
 			(libc::SYS_pipe as u64, [buffer, 0, 0, 0, 0, 0])
 		},
+		Step::PlainSocket { domain, kind, protocol } => {
+			(libc::SYS_socket as u64, [domain, kind, protocol, 0, 0, 0])
+		},
+		Step::PlainSocketpair { domain, kind, protocol, buffer } => {
+			(libc::SYS_socketpair as u64, [domain, kind, protocol, buffer, 0, 0])
+		},
+		Step::PlainAccept { fd, addr, length } => {
+			(libc::SYS_accept as u64, [fd, addr, length, 0, 0, 0])
+		},
 		Step::Attach { fd: which, addr, length, connect } => (
 			if connect { libc::SYS_connect as u64 } else { libc::SYS_bind as u64 },
 			[fd_of(which), addr, length, 0, 0, 0],
@@ -959,6 +1044,53 @@ fn capture_pipe(
 	write_ends.insert(read_end, handle.into());
 	install_handlers();
 	Some((read_end, write_end))
+}
+
+/// The type/flags bits that socket, socketpair and accept4 take from 2.6.27 on.
+const SOCK_FLAGS: u64 = (libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) as u64;
+
+/// The fcntl steps that apply the SOCK_NONBLOCK / SOCK_CLOEXEC bits of `flags` to one fd.
+fn flag_steps(flags: u64, fd: Which) -> Vec<Step> {
+	let mut steps = Vec::new();
+	if flags & libc::SOCK_NONBLOCK as u64 != 0 {
+		steps.push(Step::Nonblock { fd });
+	}
+	if flags & libc::SOCK_CLOEXEC as u64 != 0 {
+		steps.push(Step::FcntlCloexec { fd });
+	}
+	steps
+}
+
+/// Probe once whether socket(2) rejects the SOCK_CLOEXEC type flag (before 2.6.27 it
+/// is EINVAL: the type is just a number there).
+fn sock_flags_missing() -> bool {
+	static MISSING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*MISSING.get_or_init(|| {
+		// The raw syscall: musl's socket() retries without the flags on EINVAL
+		// and would hide exactly what is being probed.
+		let rc = unsafe {
+			libc::syscall(
+				libc::SYS_socket,
+				libc::AF_UNIX,
+				libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+				0,
+			)
+		};
+		if rc >= 0 {
+			unsafe { libc::close(rc as libc::c_int) };
+			return false;
+		}
+		std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL)
+	})
+}
+
+/// Probe once whether the kernel implements accept4(2) (added in 2.6.28).
+fn accept4_missing() -> bool {
+	static MISSING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*MISSING.get_or_init(|| {
+		let rc = unsafe { libc::syscall(libc::SYS_accept4, -1i32, 0u64, 0u64, 0i32) };
+		not_implemented(libc::SYS_accept4, rc)
+	})
 }
 
 /// Probe once whether the kernel implements eventfd(2) (added in 2.6.22, with
