@@ -88,14 +88,22 @@ fn main() {
     kernel_compat::exit_if_internal_probe();
 
     if kernel_compat::enabled() {
-        kernel_compat::run_traced(&|| {
-            // exec your target here
+        kernel_compat::run_traced(|| {
+            // exec your target here (closures may move owned args)
         });
     }
 }
 ```
 
 Or run an arbitrary command under the layer with `kernel_compat::run_command_traced(&args)`.
+
+To wrap only a specific helper binary on kernels that lack the `*at` syscalls (`< 2.6.16` on `x86_64`), gate on `kernel_compat::at_syscalls_missing()` (returns `false` on `>= 2.6.16`, `aarch64`, and unsupported architectures):
+
+```rust
+if kernel_compat::at_syscalls_missing() {
+    kernel_compat::run_traced(|| exec_helper(owned_args));
+}
+```
 
 ### Customizing environment variables and log prefix
 

@@ -25,10 +25,12 @@ fn main() {
 			);
 		}
 		"run-traced" => {
-			kernel_compat::run_traced(&|| {
+			let owned_tag = String::from("moved-ok");
+			kernel_compat::run_traced(move || {
 				let active_after = kernel_compat::is_active();
+				let moved = owned_tag;
 				println!(
-					"before:active={active_before},enabled={enabled_before},env={active_env};after:active={active_after}"
+					"before:active={active_before},enabled={enabled_before},env={active_env};after:active={active_after},tag={moved}"
 				);
 				std::process::exit(0);
 			});

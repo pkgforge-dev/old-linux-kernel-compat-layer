@@ -500,7 +500,7 @@ pub fn run_command_traced(args: &[String]) -> ! {
 	if !enabled() {
 		launch()
 	}
-	run_traced(&launch)
+	run_traced(launch)
 }
 
 /// Fork a tracer supervisor in the parent (which never returns) and return in
@@ -522,8 +522,12 @@ pub fn enter_traced() {
 	}
 
 	// Prime the no_new_privs/execve probe in this (untraced) parent, so the
-	// traced child does not have to fork while it is being ptraced.
-	let _ = nnp_exec_broken();
+	// traced child does not have to fork while it is being ptraced. Skip it on
+	// kernels older than 3.5 where seccomp-bpf does not exist anyway.
+	let try_seccomp = !kernel_lt(3, 5, 0);
+	if try_seccomp {
+		let _ = nnp_exec_broken();
+	}
 
 	// Handshake pipe: the child reports whether it could install the seccomp
 	// filter, so the parent knows whether to stop only on the translated
@@ -542,7 +546,7 @@ pub fn enter_traced() {
 				}
 				return;
 			}
-			let seccomp = install_seccomp_filter();
+			let seccomp = try_seccomp && install_seccomp_filter();
 			if have_pipe {
 				let byte = [u8::from(seccomp)];
 				unsafe {
@@ -576,7 +580,7 @@ pub fn enter_traced() {
 }
 
 /// Fork, trace the child and let it call `launch`, which must not return.
-pub fn run_traced(launch: &dyn Fn()) -> ! {
+pub fn run_traced<F: FnOnce()>(launch: F) -> ! {
 	enter_traced();
 	launch();
 	exit(1)

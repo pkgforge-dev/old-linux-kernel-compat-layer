@@ -173,6 +173,23 @@ pub fn kernel_lt(major: u64, minor: u64, patch: u64) -> bool {
 	}
 }
 
+/// Probe once whether the kernel lacks the `*at` syscalls (`openat`,
+/// `newfstatat`, etc., added in Linux 2.6.16).
+///
+/// Always returns `false` on `aarch64` (mainline since 3.7) and unsupported
+/// targets. Useful for callers that only need to wrap a specific helper binary
+/// on pre-2.6.16 kernels without wrapping the whole process.
+pub fn at_syscalls_missing() -> bool {
+	#[cfg(target_arch = "x86_64")]
+	{
+		kernel_compat::at_missing()
+	}
+	#[cfg(not(target_arch = "x86_64"))]
+	{
+		false
+	}
+}
+
 /// Activate the compatibility layer for the current process if [`enabled`] is
 /// true.
 ///
@@ -197,10 +214,13 @@ pub fn enter() {
 /// Fork a supervisor process and run `launch` inside the traced child, never
 /// returning.
 ///
+/// Accepts any `FnOnce()` (so closures may move owned arguments such as a
+/// `Vec<String>`). Note that `&|| ...` also implements `FnOnce()`.
+///
 /// If the layer is already active (`OLD_KERNEL_COMPAT_ACTIVE=1`), if `ptrace`
 /// is unavailable, or on unsupported architectures, `launch` is invoked
 /// directly.
-pub fn run_traced(launch: &dyn Fn()) -> ! {
+pub fn run_traced<F: FnOnce()>(launch: F) -> ! {
 	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 	{
 		kernel_compat::run_traced(launch)
