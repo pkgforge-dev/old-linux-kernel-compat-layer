@@ -319,7 +319,7 @@ pub fn run_command_traced(args: &[String]) -> ! {
 	if !enabled() {
 		launch()
 	}
-	run_traced(&launch)
+	run_traced(launch)
 }
 
 /// Fork a tracer supervisor in the parent (which never returns) and return in
@@ -334,7 +334,12 @@ pub fn enter_traced() {
 		return;
 	}
 
-	let _ = nnp_exec_broken();
+	// seccomp-bpf arrived on arm64 in Linux 3.19; skip the self-reexec probe
+	// and filter setup on 3.11–3.18.
+	let try_seccomp = !kernel_lt(3, 19, 0);
+	if try_seccomp {
+		let _ = nnp_exec_broken();
+	}
 
 	let mut pipe_fds = [0i32; 2];
 	let have_pipe = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0;
@@ -350,7 +355,7 @@ pub fn enter_traced() {
 				}
 				return;
 			}
-			let seccomp = install_seccomp_filter();
+			let seccomp = try_seccomp && install_seccomp_filter();
 			if have_pipe {
 				let byte = [u8::from(seccomp)];
 				unsafe {
@@ -380,7 +385,7 @@ pub fn enter_traced() {
 }
 
 /// Fork, trace the child and let it call `launch`, which must not return.
-pub fn run_traced(launch: &dyn Fn()) -> ! {
+pub fn run_traced<F: FnOnce()>(launch: F) -> ! {
 	enter_traced();
 	launch();
 	exit(1)

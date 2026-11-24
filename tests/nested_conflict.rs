@@ -83,9 +83,14 @@ fn env_active_suppresses_tracer_without_reading_proc() {
 		"should not start tracer when OLD_KERNEL_COMPAT_ACTIVE=1; stderr:\n{stderr}"
 	);
 	assert!(
-		stdout.contains("before:active=true,enabled=false,env=1;after:active=true"),
+		stdout.contains("before:active=true,enabled=false,env=1;after:active=true,tag=moved-ok"),
 		"unexpected stdout:\n{stdout}"
 	);
+}
+
+#[test]
+fn at_syscalls_missing_is_false_on_modern_kernel() {
+	assert!(!old_linux_kernel_compat_layer::at_syscalls_missing());
 }
 
 #[test]
