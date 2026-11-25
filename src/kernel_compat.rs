@@ -270,6 +270,15 @@ fn clone_thread_needs_detached() -> bool {
 	*NEEDED.get_or_init(|| kernel_lt(2, 6, 2))
 }
 
+/// `flags` of a `clone` call with `CLONE_DETACHED` added if it creates a thread.
+fn with_detached_for_thread(flags: u64) -> u64 {
+	if flags & libc::CLONE_THREAD as u64 != 0 {
+		flags | libc::CLONE_DETACHED as u64
+	} else {
+		flags
+	}
+}
+
 fn is_at_call(nr: u64) -> bool {
 	[
 		libc::SYS_openat, libc::SYS_mkdirat, libc::SYS_mknodat, libc::SYS_fchownat,
@@ -1151,11 +1160,10 @@ impl Tracer {
 			}
 		}
 		if regs.orig_rax == libc::SYS_clone as u64
-			&& regs.rdi & libc::CLONE_THREAD as u64 != 0
-			&& regs.rdi & libc::CLONE_DETACHED as u64 == 0
+			&& with_detached_for_thread(regs.rdi) != regs.rdi
 			&& clone_thread_needs_detached()
 		{
-			regs.rdi |= libc::CLONE_DETACHED as u64;
+			regs.rdi = with_detached_for_thread(regs.rdi);
 			let _ = ptrace::setregs(pid, regs);
 			if debug() {
 				eprintln!("kernel-compat: clone(CLONE_THREAD) given CLONE_DETACHED (needs 2.6.2)");
@@ -1269,7 +1277,7 @@ impl Tracer {
 			}
 			self.last_syscall.insert(pid, regs.orig_rax);
 			if self.translate_common(pid, regs).is_some() {
-				// futex, pipe2 and statx are done; no syscall number below can
+				// open, clone, futex, pipe2 and statx are done; no syscall number below can
 				// also match, so there is nothing left to try.
 				return
 			}
@@ -2254,4 +2262,21 @@ fn emulate_sigill(pid: Pid) -> bool {
 #[cfg(not(target_arch = "x86_64"))]
 fn emulate_sigill(_pid: Pid) -> bool {
 	false
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn thread_clone_gets_detached() {
+		let thread = (libc::CLONE_VM | libc::CLONE_FS | libc::CLONE_FILES | libc::CLONE_SIGHAND | libc::CLONE_THREAD) as u64;
+		let detached = libc::CLONE_DETACHED as u64;
+		assert_eq!(with_detached_for_thread(thread), thread | detached);
+		// already detached, or not a thread: unchanged
+		assert_eq!(with_detached_for_thread(thread | detached), thread | detached);
+		let fork = libc::SIGCHLD as u64;
+		assert_eq!(with_detached_for_thread(fork), fork);
+		assert_eq!(with_detached_for_thread(libc::CLONE_VM as u64 | fork), libc::CLONE_VM as u64 | fork);
+	}
 }
