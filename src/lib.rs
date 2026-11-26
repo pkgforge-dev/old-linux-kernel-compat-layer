@@ -2,7 +2,7 @@
 //! binaries (such as binaries built against a modern `--enable-kernel=4.4`
 //! glibc) on ancient Linux kernels:
 //!
-//! - `x86_64`: down to **Linux 2.6.8**
+//! - `x86_64`: down to **Linux 2.6.0**
 //! - `aarch64`: down to **Linux 3.11** (Ubuntu 13.10, the first Ubuntu release
 //!   with `arm64`)
 //!

@@ -2,7 +2,7 @@
 
 A minimal ptrace/seccomp-based compatibility layer (Rust crate, `x86_64` and `aarch64` Linux) for running binaries built against a modern glibc (such as an Arch Linux `--enable-kernel=4.4` glibc) on ancient Linux kernels:
 
-- **`x86_64`**: down to **Linux 2.6.8** (Debian 3.1)
+- **`x86_64`**: down to **Linux 2.6.0**
 - **`aarch64`**: down to **Linux 3.11** (Ubuntu 13.10 Saucy Salamander, the first Ubuntu release with `arm64`)
 
 This layer was originally written inside [Anylinux-sharun](https://github.com/pkgforge-dev/Anylinux-sharun) and was split off into its own crate so that other projects can reuse it directly without duplicating the tracer or shelling out to `sharun`.
@@ -11,7 +11,7 @@ This layer was originally written inside [Anylinux-sharun](https://github.com/pk
 
 Modern binaries and libc builds both execute instructions old kernels do not enable and call syscalls that did not exist yet. The layer catches `SIGILL` to emulate unsupported instructions and intercepts missing syscalls at trace time. Each translation is gated on a one-time probe (or a kernel version check when there is nothing reliable to probe).
 
-### `x86_64` (down to Linux 2.6.8)
+### `x86_64` (down to Linux 2.6.0)
 
 Most syscalls are rewritten in place to an older equivalent; syscalls that no single older call can answer are emulated with a short sequence of injected syscalls inside the traced process. `SIGILL` emulates `XGETBV` with `XCR0 = 0`.
 
