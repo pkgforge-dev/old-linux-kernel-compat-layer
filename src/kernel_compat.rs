@@ -279,6 +279,22 @@ fn with_detached_for_thread(flags: u64) -> u64 {
 	}
 }
 
+/// Up to 2.6.1 x86_64 user space ends at 512 GB, and an `mmap` hint beyond it fails with ENOMEM
+/// instead of being ignored, as it is from 2.6.2. Allocators that reserve address space at a
+/// random high hint (V8 and PartitionAlloc, so Electron) die on it.
+const OLD_USER_SPACE: u64 = 1 << 39;
+
+fn mmap_hint_is_an_error() -> bool {
+	static ERROR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*ERROR.get_or_init(|| kernel_lt(2, 6, 2))
+}
+
+/// Whether an `mmap(addr, len, .., flags)` hint lies beyond the old user space, so the
+/// kernel would reject the call rather than place the mapping elsewhere.
+fn hint_beyond_old_user_space(addr: u64, len: u64, flags: u64) -> bool {
+	addr != 0 && flags & libc::MAP_FIXED as u64 == 0 && addr.saturating_add(len) > OLD_USER_SPACE
+}
+
 fn is_at_call(nr: u64) -> bool {
 	[
 		libc::SYS_openat, libc::SYS_mkdirat, libc::SYS_mknodat, libc::SYS_fchownat,
@@ -1167,6 +1183,20 @@ impl Tracer {
 			let _ = ptrace::setregs(pid, regs);
 			if debug() {
 				eprintln!("kernel-compat: clone(CLONE_THREAD) given CLONE_DETACHED (needs 2.6.2)");
+			}
+			return Some(false);
+		}
+		// 9 is `link` for a 32-bit tracee: only x86_64 ones have `mmap` there.
+		if regs.cs == 0x33
+			&& regs.orig_rax == libc::SYS_mmap as u64
+			&& hint_beyond_old_user_space(regs.rdi, regs.rsi, regs.r10)
+			&& mmap_hint_is_an_error()
+		{
+			let hint = regs.rdi;
+			regs.rdi = 0;
+			let _ = ptrace::setregs(pid, regs);
+			if debug() {
+				eprintln!("kernel-compat: mmap hint {hint:#x} beyond the address space dropped (needs 2.6.2)");
 			}
 			return Some(false);
 		}
@@ -2278,5 +2308,19 @@ mod tests {
 		let fork = libc::SIGCHLD as u64;
 		assert_eq!(with_detached_for_thread(fork), fork);
 		assert_eq!(with_detached_for_thread(libc::CLONE_VM as u64 | fork), libc::CLONE_VM as u64 | fork);
+	}
+}
+
+#[cfg(test)]
+mod mmap_hint_tests {
+	use super::*;
+
+	#[test]
+	fn only_out_of_range_hints_are_dropped() {
+		let gb = 1u64 << 30;
+		assert!(hint_beyond_old_user_space(0x27e8_0000_0000, 32 * gb, 0));
+		assert!(!hint_beyond_old_user_space(0x19_0000_0000, 32 * gb, 0));
+		assert!(!hint_beyond_old_user_space(0, 32 * gb, 0));
+		assert!(!hint_beyond_old_user_space(0x27e8_0000_0000, 32 * gb, libc::MAP_FIXED as u64));
 	}
 }
